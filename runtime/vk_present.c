@@ -398,6 +398,26 @@ int vk_present_captured(const uint8_t **px, int *w, int *h, VkFormat *fmt) {
     return ok;
 }
 
+// ---- TOTK_PRESENT_SHOTS=<lo>-<hi>:<step> [TOTK_PRESENT_SHOTS_DIR]: the finished swapchain image, after the colour
+// adjustment, the scale and SMAA and before the flip, as <dir>/p<n>.png (n the present). TOTK_SHOTS cannot show this:
+// it reads the game's own present texture, so a fault of the port's present chain (vk_present.c present_image,
+// vk_color.c, vk_smaa.c) is invisible to it. Kept in the same lo-hi:step form as TOTK_SHOTS.
+static int g_ps_on;
+static unsigned long long g_ps_lo, g_ps_hi, g_ps_step;
+static const char *g_ps_dir;
+
+static int present_shot_due(uint64_t n) {
+    static int parsed;
+    if (!parsed) {
+        const char *e = cfg_get("TOTK_PRESENT_SHOTS");
+        if (e && sscanf(e, "%llu-%llu:%llu", &g_ps_lo, &g_ps_hi, &g_ps_step) == 3 && g_ps_step) g_ps_on = 1;
+        g_ps_dir = cfg_get("TOTK_PRESENT_SHOTS_DIR") ? cfg_get("TOTK_PRESENT_SHOTS_DIR") : ".";
+        if (g_ps_on) plat_file_mkdir_p(g_ps_dir);
+        parsed = 1;
+    }
+    return g_ps_on && n >= g_ps_lo && n <= g_ps_hi && (n - g_ps_lo) % g_ps_step == 0;
+}
+
 // The captured swapchain image as a PNG (the menu's test hook), RGBA with opaque alpha.
 static void save_capture(const char *path) {
     size_t n = (size_t)g_cap_w * (size_t)g_cap_h * 4;
@@ -413,7 +433,7 @@ static void save_capture(const char *path) {
     }
     rt_write_png(path, px, (uint32_t)g_cap_w, (uint32_t)g_cap_h);
     free(px);
-    rt_log("gfx: menu test shot %s (%dx%d)", path, g_cap_w, g_cap_h);
+    rt_log("gfx: saved %s (%dx%d)", path, g_cap_w, g_cap_h);
 }
 
 // The rectangle {x, y, w, h} of a dw x dh swapchain image the cw x ch picture goes into; gfx_window.c fits it.
@@ -478,7 +498,9 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
                      g_sc_ext.height, cw, ch, g_scaler};
     int overlay = g_sc_view[idx] &&
                   menu_overlay_frame(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), &mt, &menu_shot);
-    int cap = (g_capture || menu_shot) && ensure_capture_buffer();
+    uint64_t pframe = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int pshot = present_shot_due(pframe);
+    int cap = (g_capture || menu_shot || pshot) && ensure_capture_buffer();
     VkFormatProperties sfp;
     vkGetPhysicalDeviceFormatProperties(c->phys, g_sc_fmt, &sfp);   // the thumbnail is a blit from the swapchain image
     int thumb = g_th_n && (sfp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && ensure_thumbs();
@@ -651,6 +673,11 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         g_cap_h = (int)g_sc_ext.height;
         g_cap_valid = 1;
         if (menu_shot) save_capture(menu_shot);
+        if (pshot) {
+            char path[PLAT_PATH_MAX];
+            snprintf(path, sizeof path, "%s/p%05llu.png", g_ps_dir, (unsigned long long)pframe);
+            save_capture(path);
+        }
     }
 out:
     plat_rmutex_unlock(&g_pl);
@@ -658,6 +685,92 @@ out:
 
 void vk_present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
     present_image(src, layout, fmt, w, h, crop, 0);
+}
+
+// One frame of the boot loading screen (boot.c, before the guest starts): the swapchain cleared to the screen's
+// background, then the pipeline progress ImGui lays out. It shares the acquire, fence and present machinery with
+// present_image but blits no game image, so it works before the first NVN present exists.
+void vk_present_boot(const GfxBootProgress *p) {
+    if (gfx_window_exiting()) return;
+    gfx_window_start();
+    VkCtx *c = vk_ctx();
+    plat_rmutex_lock(&g_pl);
+    if (gfx_window_exiting()) { plat_rmutex_unlock(&g_pl); return; }
+    if (!g_sc || gfx_window_dirty()) {
+        if (!wsys_minimized() && !create_swapchain() && !g_sc) goto out;
+    }
+    if (wsys_minimized() || !g_sc) goto out;
+    unsigned slot = g_frame % FRAMES;
+    if (vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull) != VK_SUCCESS) goto out;
+    uint32_t idx = 0;
+    VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        gfx_window_mark_dirty();
+        if (!create_swapchain()) goto out;
+        r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+    }
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) goto out;
+    if (r == VK_SUBOPTIMAL_KHR) gfx_window_mark_dirty();
+    vkResetFences(c->device, 1, &g_fence[slot]);
+    VkCommandBuffer cb = g_cb[slot];
+    vkResetCommandBuffer(cb, 0);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(cb, &bi);
+    VkImage dst = g_sc_img[idx];
+    VkClearColorValue bg = {.float32 = {0.031f, 0.043f, 0.078f, 1.0f}};
+    VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    sync_barrier(cb, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0,
+                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdClearColorImage(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &bg, 1, &all);
+    MenuTarget mt = {c->instance, c->phys, c->device, c->gfx_family, c->gfx_queue, g_sc_fmt, g_sc_ext.width,
+                     g_sc_ext.height, (int)g_sc_ext.width, (int)g_sc_ext.height, 0};
+    MenuBootInfo b = {p->phase, p->done, p->total, p->elapsed_s};
+    int overlay = g_sc_view[idx] && menu_boot_frame(&mt, &b);
+    VkImageLayout last = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    VkPipelineStageFlags2 last_stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    VkAccessFlags2 last_write = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    if (overlay) {
+        VkImageView menu_view = g_sc_hdr ? vk_hdr_ui_target(cb, g_sc_ext.width, g_sc_ext.height) : VK_NULL_HANDLE;
+        sync_barrier(cb, dst, last, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, last_stage, last_write,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                        .imageView = menu_view ? menu_view : g_sc_view[idx],
+                                        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                        .loadOp = menu_view ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_sc_ext}, .layerCount = 1,
+                              .colorAttachmentCount = 1, .pColorAttachments = &ca};
+        vkCmdBeginRendering(cb, &ri);
+        menu_overlay_draw(cb);
+        vkCmdEndRendering(cb);
+        if (menu_view) vk_hdr_ui_compose(cb, g_sc_view[idx], g_sc_fmt, g_sc_ext.width, g_sc_ext.height);
+        last = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        last_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        last_write = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    sync_barrier(cb, dst, last, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, last_stage, last_write, VK_PIPELINE_STAGE_2_NONE, 0);
+    vkEndCommandBuffer(cb);
+    VkSemaphoreSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_acquire[slot],
+                                  .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    VkSemaphoreSubmitInfo sig = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_render_done[idx],
+                                 .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    VkCommandBufferSubmitInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb};
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wait,
+                        .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi, .signalSemaphoreInfoCount = 1,
+                        .pSignalSemaphoreInfos = &sig};
+    vk_queue_lock();
+    r = vkQueueSubmit2(c->gfx_queue, 1, &si, g_fence[slot]);
+    vk_queue_unlock();
+    if (r == VK_SUCCESS) {
+        g_flip_on = 1;
+        g_flip_idx = idx;
+        flip_locked();
+    }
+    g_frame++;
+out:
+    plat_rmutex_unlock(&g_pl);
 }
 
 void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {

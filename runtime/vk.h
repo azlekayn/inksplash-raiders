@@ -192,6 +192,9 @@ void gfx_vsync_bind_counter(volatile int32_t *counter);  // host-side stand-in f
 // The Vulkan back end's window entries (GfxBackend.window_start, window_resize, present_mode, window_hdr10, exit_wait, exit_release;
 // gfx.h). gfx_window_start calls the first under its start lock: the device, window, surface and swapchain, idempotent.
 void vk_present_window_start(void);
+// The prewarm's progress and its loading screen, before the first game frame (boot.c, GfxBootProgress).
+void vk_boot_progress(GfxBootProgress *p);
+void vk_present_boot(const GfxBootProgress *p);
 void vk_present_window_resize(void);               // the window has its new size; the swapchain follows it
 const char *vk_present_mode(void);                  // the present mode the swapchain got; "" before one
 int vk_present_hdr10(void);                         // the swapchain is HDR10 now (any thread)

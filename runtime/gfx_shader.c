@@ -2416,6 +2416,15 @@ typedef struct {
     volatile int32_t missing, other_cached;
 } Warm;
 
+// Counters of the prewarm that is running, read by the boot loading screen (gfx_boot_progress). total is 0 when no
+// prewarm is in flight, so the screen moves on to the pipeline phase.
+static volatile uint64_t gfx_warm_done, gfx_warm_total;
+
+void gfx_shader_prewarm_progress(uint64_t *done, uint64_t *total) {
+    *done = __atomic_load_n(&gfx_warm_done, __ATOMIC_RELAXED);
+    *total = __atomic_load_n(&gfx_warm_total, __ATOMIC_RELAXED);
+}
+
 static void warm_worker(void *arg) {
     Warm *w = arg;
     for (;;) {
@@ -2434,6 +2443,7 @@ static void warm_worker(void *arg) {
             else gfx_shader_load_input(iid, 1);
         }
         plat_inc64(&w->done);
+        __atomic_add_fetch(&gfx_warm_done, 1, __ATOMIC_RELAXED);
     }
 }
 
@@ -2491,6 +2501,8 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
     w.n_other = other_inputs(sorted, sorted ? n : 0, &w.other);
     free(sorted);
     size_t total = w.n_named + w.n_other;
+    __atomic_store_n(&gfx_warm_done, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&gfx_warm_total, total, __ATOMIC_RELAXED);
     threads = threads < 1 ? 1 : threads > 64 ? 64 : threads;
     if ((size_t)threads > total) threads = (int)(total ? total : 1);
     svc_set_limit(procs);
@@ -2504,6 +2516,7 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
             rt_log("gfx_shader: prewarm: %lld of %zu shaders, %llu translated, %.0f ms", (long long)w.done, total,
                    (unsigned long long)((uint64_t)n_xlated - xl0), (double)plat_now_ms() - t0);
     svc_set_limit(svc_runtime_limit());
+    __atomic_store_n(&gfx_warm_done, __atomic_load_n(&gfx_warm_total, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
     rt_log("gfx_shader: prewarm: %zu shaders named by pipeline keys (%ld not available), %zu other stored inputs (%ld "
            "cached); %llu translated, %llu failed, with up to %d translators and %d threads, in %.0f ms", w.n_named,
            (long)w.missing, w.n_other, (long)w.other_cached, (unsigned long long)((uint64_t)n_xlated - xl0),

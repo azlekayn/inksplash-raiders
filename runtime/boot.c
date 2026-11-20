@@ -394,6 +394,8 @@ static void slow_watch_main(void *arg) {
     }
 }
 
+static volatile int warm_done;   // the prewarm thread finished (boot's loading screen polls it)
+
 static void prewarm_main(void *arg) {
     (void)arg;
     gfx_backend()->boot_prewarm();
@@ -402,6 +404,7 @@ static void prewarm_main(void *arg) {
         int cpus = (int)plat_cpu_usable();
         gfx_shader_prepare_recorded(cpus, cpus / 2 > 16 ? 16 : cpus / 2 < 1 ? 1 : cpus / 2);
     }
+    __atomic_store_n(&warm_done, 1, __ATOMIC_RELEASE);
     return;
 }
 
@@ -424,8 +427,65 @@ static void boot_main(void *arg) {
     cb_addr[2] = hostfn_register("<rtld module_finis>", cb_module_finis);
     hostfn_seal();
     uint64_t held = plat_now_ms();
-    if (warm) plat_thread_join(warm);
-    else gfx_backend()->boot_prewarm();
+    // The prewarm runs on its own thread; present the pipeline loading screen while it works, so its pipelines do not
+    // turn into hitches in the first frames of play. With nothing recorded to prepare it returns before any frame.
+    if (warm && cfg_bool("TOTK_BOOT_SCREEN") && !rt_config()->shot) {
+        // Test hook: TOTK_BOOT_SCREEN_HOLD_MS shows the screen for that long with a running example progress, so its
+        // layout can be looked at after the cache is warm (the prewarm itself then takes under a second).
+        const char *hold = cfg_get("TOTK_BOOT_SCREEN_HOLD_MS");
+        if (hold && *hold) {
+            uint64_t ms = (uint64_t)strtoul(hold, NULL, 10), t0 = plat_now_ms();
+            for (;;) {
+                uint64_t el = plat_now_ms() - t0;
+                if (el >= ms) break;
+                GfxBootProgress p = {0};
+                p.active = 1;
+                p.phase = 1;
+                p.total = 34576;
+                p.done = (uint64_t)((double)p.total * (double)el / (double)ms);
+                p.elapsed_s = (double)el / 1000.0;
+                if (gfx_backend()->boot_screen) gfx_backend()->boot_screen(&p);
+                plat_sleep_ms(33);
+            }
+            rt_log("boot: loading screen hold %.0f ms (TOTK_BOOT_SCREEN_HOLD_MS)", (double)ms);
+        }
+        GfxBootProgress last = {0};
+        int shown = 0, logged = 0;
+        uint64_t min_ms = 1200;   // the screen stays up this long at least, so a short prewarm does not just flash
+        const char *ms = cfg_get("TOTK_BOOT_SCREEN_MIN_MS");
+        if (ms && *ms) min_ms = (uint64_t)strtoul(ms, NULL, 10);
+        for (;;) {
+            int done = __atomic_load_n(&warm_done, __ATOMIC_ACQUIRE);
+            GfxBootProgress p = {0};
+            if (gfx_backend()->boot_progress) gfx_backend()->boot_progress(&p);
+            if (p.active) last = p;
+            else p = last;
+            p.elapsed_s = (plat_now_ms() - held) / 1000.0;
+            if (done) {
+                p.active = last.total > 0;
+                p.done = p.total;
+            }
+            if (p.active && gfx_backend()->boot_screen) {
+                if (!logged) {
+                    rt_log("boot: loading screen: %s %llu of %llu, %.0f ms of prewarm",
+                           p.phase ? "pipelines" : "shaders", (unsigned long long)p.done,
+                           (unsigned long long)p.total, (double)(plat_now_ms() - held));
+                    logged = 1;
+                }
+                gfx_backend()->boot_screen(&p);
+                shown = 1;
+            }
+            if (done && (!shown || plat_now_ms() - held >= min_ms)) break;
+            plat_sleep_ms(33);
+        }
+        if (shown) rt_log("boot: loading screen closed after %.0f ms (prewarm %.0f ms)",
+                          (double)(plat_now_ms() - held), (double)(plat_now_ms() - held));
+        plat_thread_join(warm);
+    } else if (warm) {
+        plat_thread_join(warm);
+    } else {
+        gfx_backend()->boot_prewarm();
+    }
     held = plat_now_ms() - held;
     rt_log("boot: guest starts %llu ms after process start (%llu ms of it waiting for the prewarm)",
            (unsigned long long)(plat_process_uptime_ns() / 1000000), (unsigned long long)held);

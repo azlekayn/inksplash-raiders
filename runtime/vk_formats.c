@@ -3,7 +3,9 @@
 // Differences from LAS: the table is indexed by the NVNformat values of nvn.h and covers all of them, ASTC decodes to
 // RGBA8 unless the device samples it (vk_astc.c, TOTK_ASTC), D24S8 is always D32S8 (no probing: the RX 9070 lacks
 // it), 3-component formats expand to 4 components, and formats with no Vulkan equivalent are reported with a reason.
+#include <stdlib.h>
 #include <string.h>
+#include "host.h"
 #include "tex.h"
 
 #define S VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
@@ -103,6 +105,20 @@ static const struct { uint8_t bw, bh; VkFormat unorm, srgb; } astc[14] = {
     {12, 12, VK_FORMAT_ASTC_12x12_UNORM_BLOCK, VK_FORMAT_ASTC_12x12_SRGB_BLOCK},
 };
 
+// TOTK_D24S8=1: keep NVN's 24-bit depth formats rather than standing in 32-bit ones. NVN DEPTH24_STENCIL8 (0x35) is
+// D32_SFLOAT_S8_UINT here because an RX 9070 reportedly lacks D24S8 attachments, and DEPTH24 (0x33) likewise. The two
+// differ in how the depth test steps and how depth bias scales (24-bit unorm against a float step), which is what
+// self-shadow acne and polygon-offset stripes look like. The override only applies when the device supports the
+// formats, and the upload path still sees them as native (vk == ideal).
+static int d24_override(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("TOTK_D24S8");
+        on = e && *e && strcmp(e, "0") != 0;
+    }
+    return on;
+}
+
 int tex_vk_format(int nvn_format, TexVkFormat *o) {
     memset(o, 0, sizeof *o);
     o->vk = o->ideal = VK_FORMAT_UNDEFINED;
@@ -158,6 +174,22 @@ int tex_vk_format(int nvn_format, TexVkFormat *o) {
     if (f == 0x35 || f == 0x36) o->depth = o->stencil = 1;
     if (f == 0x35) o->ideal = VK_FORMAT_D24_UNORM_S8_UINT;
     if (o->depth || o->stencil) o->need = S | TX | DS;
+    if ((f == 0x33 || f == 0x35) && d24_override()) {
+        VkFormat want = f == 0x35 ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_X8_D24_UNORM_PACK32;
+        VkFormat prev = o->vk;
+        o->vk = want;
+        if (!vk_ctx() || tex_vk_format_supported(o)) {
+            o->ideal = want;
+            o->note = "24-bit depth kept as NVN's 24-bit format (TOTK_D24S8=1)";
+            static int said_ok;
+            if (!said_ok++) rt_log("vk: TOTK_D24S8=1: depth formats use their native 24-bit Vulkan formats");
+        } else {
+            o->vk = o->ideal = prev;
+            static int said;
+            if (!said++) rt_log("vk: TOTK_D24S8=1: 0x%02X stays %s, the device reports no 24-bit attachment support",
+                                f, f == 0x35 ? "D32_SFLOAT_S8_UINT" : "D32_SFLOAT");
+        }
+    }
     return 1;
 }
 

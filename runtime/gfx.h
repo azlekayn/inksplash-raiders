@@ -152,6 +152,14 @@ typedef struct {
                                                                // transitions
 } GfxExecFrame;
 enum { GFX_TOOL_PREPARE_SHADERS, GFX_TOOL_TRANSLATE_SHADERS, GFX_TOOL_WARM_SHADERS };   // GfxBackend.shader_tool
+// The boot prewarm's progress, for the loading screen (boot.c): what it is doing, how much of it is done and how long
+// it has run. phase 0: translating the shaders the recorded pipelines name; phase 1: building those pipelines.
+typedef struct {
+    int active;          // 0: the prewarm has nothing to show (no work queued)
+    int phase;           // 0 shaders, 1 pipelines
+    uint64_t done, total;
+    double elapsed_s;    // filled by boot.c, not the back end
+} GfxBootProgress;
 typedef struct {
     const char *name;
     // ---- guest side: called by the NVN front end (nvn_api_*.c, nvn_ext.c) on guest threads.
@@ -186,6 +194,8 @@ typedef struct {
     int  (*window_hdr10)(void);     // gfx_window_hdr10: the swapchain is HDR10 now; any thread, guest threads included
     void (*boot_async)(void);       // boot, before the prewarm: pipelines may be built in the background (not with --shot)
     void (*boot_prewarm)(void);     // boot: what earlier runs recorded is made ready; the guest starts after it returns
+    void (*boot_progress)(GfxBootProgress *p);   // boot, while boot_prewarm runs on another thread: its counters
+    void (*boot_screen)(const GfxBootProgress *p);   // boot: one frame of the loading screen; the window must exist
     void (*save)(void);             // every exit path, with the saves: the back end's caches and records go to disk
     // gfx_exit_release, before the process ends. exit_wait runs before gfx_window.c's start lock: the present queued
     // last goes out, and the thread that presents it may be waiting for that lock (gfx_window_start). exit_release
@@ -205,6 +215,7 @@ typedef struct {
 extern const GfxBackend gfx_null_backend, gfx_vulkan_backend;
 const GfxBackend *gfx_backend(void);                       // TOTK_GPU=null|vulkan (default vulkan)
 int gfx_shader_tool(int tool);                             // the chosen back end's shader_tool; main.c's --*-shaders modes
+void gfx_shader_prewarm_progress(uint64_t *done, uint64_t *total);   // gfx_shader.c: the running prewarm's counters
 
 // ---- NVN front end (nvn_procs.c)
 void nvn_procs_register(void);                             // hostfn_register every proc; before hostfn_seal (ov_gfx.c)
@@ -213,6 +224,8 @@ uint64_t nvn_proc_address(const char *name);               // synthetic host add
 // ---- statistics and frames (nvn_api_*.c, vk_*.c; boot.c prints them)
 typedef struct { uint64_t frames, nvn_calls, nvn_distinct, unimplemented, validation_errors, shader_failures,
                  draws_skipped; } GfxStats;
+// The window's present interval in effect (nvn_api_obj.c): 1 at 60 fps, 2 while the game asks for 30 (its cutscenes).
+int nvn_present_interval(void);
 GfxStats gfx_stats(void);
 void rt_frame_presented(const tex_t *t, uint64_t n);       // boot.c: --frames N ends the run after the Nth present
                                                            // (saves --shot first through read_texels)

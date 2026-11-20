@@ -707,10 +707,19 @@ NVN_API(nvnWindowInitialize) {
 }
 // void nvnWindowFinalize(NVNwindow *w): nothing to release (MNG lists it in g_nops)
 NVN_API(nvnWindowFinalize) { (void)c; }
+static volatile int g_interval = 1;   // the interval of the last call, for the frame-time log
+
+int nvn_present_interval(void) { return __atomic_load_n(&g_interval, __ATOMIC_RELAXED); }
+
 NVN_API(nvnWindowSetPresentInterval) {
     win_t *o = WN(c);
     int v = (int)arg_x(c, 1);
-    if (o->interval != v) rt_log("nvn: present interval %d -> %d (frame %llu)", o->interval, v, (unsigned long long)o->presents);
+    __atomic_store_n(&g_interval, v, __ATOMIC_RELAXED);
+    if (o->interval != v) {
+        char who[160];
+        rt_log("nvn: present interval %d -> %d (frame %llu), from %s", o->interval, v,
+               (unsigned long long)o->presents, ldr_describe(c->x[30] - 4, who, sizeof who));
+    }
     o->interval = v;
 }
 // void nvnWindowSetCrop(NVNwindow *w, int x, int y, int w, int h)

@@ -332,6 +332,19 @@ static void open_window(void *arg) {
     note_applied();
     refresh_rate_update();
     if (cfg_get("TOTK_BACKGROUND_WINDOW")) rt_log("gfx: TOTK_BACKGROUND_WINDOW has no effect with SDL windows");
+    // Off the main screen and out of the way (X11/XWayland; Wayland lets no client place its own window).
+    const char *pos = cfg_get("TOTK_WINDOW_POS");
+    if (pos && *pos) {
+        int px, py;
+        if (sscanf(pos, "%d,%d", &px, &py) == 2) {
+            SDL_SetWindowPosition(g_win, px, py);
+            rt_log("gfx: window placed at %d,%d", px, py);
+        }
+    }
+    if (cfg_bool("TOTK_WINDOW_NOFOCUS")) {
+        SDL_SetWindowFocusable(g_win, false);
+        rt_log("gfx: window does not take focus (TOTK_WINDOW_NOFOCUS=1)");
+    }
     if (gfx_cfg_fullscreen()) set_mode(gfx_cfg_window_mode());
     SDL_SyncWindow(g_win);
     input_sdl_window(g_win);

@@ -2164,6 +2164,14 @@ static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
     if (d->cmp_mode) {
         si.compareEnable = VK_TRUE;
         si.compareOp = compare_op(d->cmp_func);
+        // TOTK_NO_SHADOW=1 makes every compare sampler pass (nothing is shadowed): an A/B for whether a dark or
+        // blocky region comes from the shadow maps at all. =ab follows TOTK_AB like the other knobs.
+        static int ns = -1;
+        if (ns < 0) {
+            ns = rt_knob("NO_SHADOW", "0");
+            if (ns) rt_log("vk: compare samplers forced to always pass, no shadowing (TOTK_NO_SHADOW=%d)", ns);
+        }
+        if (RT_KNOB_ON(ns)) si.compareOp = VK_COMPARE_OP_ALWAYS;
     }
     VkSamplerCustomBorderColorCreateInfoEXT cb = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
     VkSamplerReductionModeCreateInfo rm = {.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO};

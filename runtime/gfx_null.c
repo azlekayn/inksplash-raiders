@@ -141,6 +141,8 @@ static void null_cpu_synced(uint64_t fence) { (void)fence; }
 
 // The host side: no device, so nothing to warm, save or release, no thumbnails, no counters to grow and no driver to
 // name.
+static void null_boot_progress(GfxBootProgress *p) { memset(p, 0, sizeof *p); }
+static void null_boot_screen(const GfxBootProgress *p) { (void)p; }
 static void null_nothing(void) {}
 static int null_zero(void) { return 0; }
 static int null_shader_tool(int tool) {
@@ -185,6 +187,8 @@ const GfxBackend gfx_null_backend = {
     .window_hdr10 = null_zero,
     .boot_async = null_nothing,
     .boot_prewarm = null_nothing,
+    .boot_progress = null_boot_progress,
+    .boot_screen = null_boot_screen,
     .save = null_nothing,
     .exit_wait = null_nothing,
     .exit_release = null_nothing,

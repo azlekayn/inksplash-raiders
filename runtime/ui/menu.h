@@ -50,6 +50,15 @@ typedef struct {
 // path when the test hook wants this frame's swapchain image saved, else NULL. The first open starts ImGui's Vulkan
 // back end and uploads the font. With the menu closed it costs two loads and a compare.
 int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot);
+// The boot loading screen (boot.c, while the prewarm runs and before the guest starts): a cleared swapchain and this
+// layout. 1 when a frame was laid out; menu_overlay_draw records it into the present's command buffer. phase 0
+// translates the recorded shaders, 1 builds their pipelines.
+typedef struct {
+    int phase;
+    uint64_t done, total;
+    double elapsed_s;
+} MenuBootInfo;
+int menu_boot_frame(const MenuTarget *t, const MenuBootInfo *b);
 // Records the frame menu_overlay_frame laid out into cb, which is inside dynamic rendering on the image.
 void menu_overlay_draw(VkCommandBuffer cb);
 void menu_vk_release(void);               // before the device goes away (vk_present_release)

@@ -2805,6 +2805,9 @@ VkPipeline vk_pipeline_graphics_async(const VkPipeState *s, const VkPipeInfo **i
 static int id_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }
 
 // Builds queued prebuild jobs until the low queue is empty, beside the pipe_worker pool (same bookkeeping).
+// Counters of the pipeline prewarm, read by the boot loading screen (vk_boot_progress). total is 0 when none is queued.
+static volatile uint64_t pipe_done_pub, pipe_total_pub;
+
 static void warm_builder(void *arg) {
     (void)arg;
     plat_mutex_lock(&P.lock);
@@ -2827,6 +2830,7 @@ static void warm_builder(void *arg) {
             P.stats.failures++, K.failed++;
             rt_log("vk_pipeline: graphics pipeline not built: pipeline creation failed");
         }
+        __atomic_add_fetch(&pipe_done_pub, 1, __ATOMIC_RELAXED);
         K.promoted += j->demanded;
         K.left--;
         if (!--A.inflight) plat_cond_broadcast(&A.idle);
@@ -2838,6 +2842,27 @@ static void warm_builder(void *arg) {
 }
 
 static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]);
+
+void vk_boot_progress(GfxBootProgress *p) {
+    memset(p, 0, sizeof *p);
+    uint64_t sd = 0, st = 0;
+    gfx_shader_prewarm_progress(&sd, &st);
+    if (st && sd < st) {   // translating the shaders the recorded pipelines name
+        p->active = 1;
+        p->phase = 0;
+        p->done = sd;
+        p->total = st;
+        return;
+    }
+    uint64_t d = __atomic_load_n(&pipe_done_pub, __ATOMIC_RELAXED),
+             t = __atomic_load_n(&pipe_total_pub, __ATOMIC_RELAXED);
+    if (t) {   // building the pipelines
+        p->active = 1;
+        p->phase = 1;
+        p->done = d < t ? d : t;
+        p->total = t;
+    }
+}
 
 void vk_pipeline_prewarm(void) {
     const char *gpu = rt_config()->gpu;
@@ -2920,6 +2945,8 @@ void vk_pipeline_prewarm(void) {
 
     PlatThread *t[64];
     int nt = 0;
+    __atomic_store_n(&pipe_done_pub, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&pipe_total_pub, queued, __ATOMIC_RELAXED);
     for (int i = 0; i < cpus && i < 64 && queued; i++)
         if ((t[nt] = plat_thread_new(warm_builder, NULL, "pipe prewarm"))) nt++;
     if (!nt) warm_builder(NULL);

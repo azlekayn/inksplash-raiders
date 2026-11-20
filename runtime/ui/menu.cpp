@@ -1533,6 +1533,113 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     return ImGui::GetDrawData()->TotalVtxCount > 0;
 }
 
+// ---- boot loading screen (menu.h MenuBootInfo)
+
+static void boot_center(ImDrawList *dl, float cx, float y, float px, ImU32 col, const char *s) {
+    ImFont *f = ImGui::GetFont();
+    ImVec2 sz = f->CalcTextSizeA(px, FLT_MAX, 0.0f, s);
+    dl->AddText(f, px, ImVec2(cx - sz.x * 0.5f, y), col, s);
+}
+
+// "14612" -> "14,612": the pipeline counts are large enough to read better grouped.
+static void boot_count(char *out, size_t n, uint64_t v) {
+    char raw[32];
+    snprintf(raw, sizeof raw, "%llu", (unsigned long long)v);
+    size_t len = strlen(raw), o = 0;
+    for (size_t i = 0; i < len && o + 2 < n; i++) {
+        if (i && (len - i) % 3 == 0) out[o++] = ',';
+        out[o++] = raw[i];
+    }
+    out[o] = 0;
+}
+
+static void layout_boot(uint32_t w, uint32_t h, float scale, const MenuBootInfo *b) {
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const float W = (float)w, H = (float)h, cx = W * 0.5f;
+    const ImU32 bg = IM_COL32(8, 11, 20, 255), ink = IM_COL32(0, 196, 214, 255), coral = IM_COL32(255, 108, 92, 255),
+                text = IM_COL32(238, 242, 248, 255), dim = IM_COL32(146, 157, 176, 255),
+                edge = IM_COL32(64, 80, 104, 255);
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), bg);
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, 2 * scale), ink);
+    dl->AddRectFilled(ImVec2(0, H - 2 * scale), ImVec2(W, H), coral);
+
+    boot_center(dl, cx, H * 0.20f, 54 * scale, text, "SPR RECOMP");
+    char sub[160];
+    snprintf(sub, sizeof sub, "Splatoon Raiders  ·  static recompilation");
+    boot_center(dl, cx, H * 0.20f + 66 * scale, 18 * scale, dim, sub);
+    snprintf(sub, sizeof sub, "version %s", rt_port_version);
+    boot_center(dl, cx, H * 0.20f + 92 * scale, 15 * scale, dim, sub);
+    // a thin rule either side of a small diamond, as the game's own title cards use
+    float ry = H * 0.20f + 124 * scale;
+    dl->AddLine(ImVec2(cx - 150 * scale, ry), ImVec2(cx - 14 * scale, ry), edge, scale);
+    dl->AddLine(ImVec2(cx + 14 * scale, ry), ImVec2(cx + 150 * scale, ry), edge, scale);
+    dl->AddQuadFilled(ImVec2(cx, ry - 4 * scale), ImVec2(cx + 4 * scale, ry), ImVec2(cx, ry + 4 * scale),
+                      ImVec2(cx - 4 * scale, ry), coral);
+
+    const char *label = b->phase == 0 ? "Translating shaders" : "Loading pipelines";
+    const char *unit = b->phase == 0 ? "shaders" : "pipelines";
+    boot_center(dl, cx, H * 0.47f, 30 * scale, text, label);
+
+    double frac = b->total ? (double)b->done / (double)b->total : (b->done ? 1.0 : 0.0);
+    if (frac > 1) frac = 1;
+    const float bw = W * 0.46f, bh = 20 * scale, bx = cx - bw * 0.5f, by = H * 0.55f;
+    dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh), edge, 2 * scale, 0, scale);
+    dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + (float)(bw * frac), by + bh), ink, 2 * scale);
+    char pct[16];
+    snprintf(pct, sizeof pct, "%d%%", (int)(frac * 100.0 + 0.5));
+    ImFont *f = ImGui::GetFont();
+    ImVec2 psz = f->CalcTextSizeA(16 * scale, FLT_MAX, 0.0f, pct);
+    // Dark over the filled part, light over the empty track: one colour alone vanishes on one of them.
+    ImU32 pcol = cx < bx + (float)(bw * frac) ? bg : text;
+    dl->AddText(f, 16 * scale, ImVec2(cx - psz.x * 0.5f, by + (bh - psz.y) * 0.5f), pcol, pct);
+
+    char done[32], total[32], line[96];
+    boot_count(done, sizeof done, b->done);
+    boot_count(total, sizeof total, b->total);
+    snprintf(line, sizeof line, "%s / %s %s", done, total, unit);
+    dl->AddText(f, 17 * scale, ImVec2(bx, by + bh + 10 * scale), text, line);
+    if (b->done > 0 && b->done < b->total && b->elapsed_s > 0.5) {
+        double left = b->elapsed_s * (double)(b->total - b->done) / (double)b->done;
+        if (left < 1.0) snprintf(line, sizeof line, "almost done");
+        else if (left < 90.0) snprintf(line, sizeof line, "about %d s left", (int)(left + 0.5));
+        else snprintf(line, sizeof line, "about %d min left", (int)(left / 60.0 + 0.5));
+    } else {
+        snprintf(line, sizeof line, "%s", b->done >= b->total ? "finishing" : "estimating");
+    }
+    ImVec2 esz = f->CalcTextSizeA(17 * scale, FLT_MAX, 0.0f, line);
+    dl->AddText(f, 17 * scale, ImVec2(bx + bw - esz.x, by + bh + 10 * scale), dim, line);
+
+    boot_center(dl, cx, H * 0.72f, 15 * scale, dim,
+                "Compiled once and cached: this removes shader hitches while you play.");
+}
+
+extern "C" int menu_boot_frame(const MenuTarget *t, const MenuBootInfo *b) {
+    if (g_failed_flag()) return 0;
+    if (!g_ctx_ok) make_context();
+    float scale = menu_scale(t->height);
+    if (!vk_up(t) || (g_font_scale != scale && !fonts_up(scale))) {
+        rt_log("menu: Dear ImGui Vulkan back end set-up failed; the boot screen is skipped");
+        g_failed.store(1);
+        return 0;
+    }
+    if (g_theme != 2 || g_style_scale != scale) {
+        style_init(g_base_style, 2);
+        g_theme = 2;
+        ImGui::GetStyle() = g_base_style;
+        ImGui::GetStyle().ScaleAllSizes(scale);
+        g_style_scale = scale;
+    }
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)t->width, (float)t->height);
+    io.DeltaTime = 1.0f / 30.0f;
+    io.ClearInputKeys();
+    ImGui_ImplVulkan_NewFrame();
+    ImGui::NewFrame();
+    layout_boot(t->width, t->height, scale, b);
+    ImGui::Render();
+    return 1;
+}
+
 extern "C" void menu_overlay_draw(VkCommandBuffer cb) {
     uint64_t t0 = plat_now_ns();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cb);

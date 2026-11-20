@@ -132,6 +132,7 @@ static struct {
     int nworst;
 } ft;
 static uint64_t summary_t0;   // start of the current period (0: not started)
+static uint64_t slow_more;    // slow frames past the 200 the log lists (reported at exit)
 
 static void ft_report(uint64_t now, const char *tag) {
     if (ft.frames && ft.sum) {
@@ -140,9 +141,10 @@ static void ft_report(uint64_t now, const char *tag) {
             acc += ft.hist[b];
             if (acc >= cut) { low = (uint64_t)(b + 1) * 250000ull; break; }   // upper edge of the bin
         }
-        rt_log("frametime: %s: %llu frames in %.1f s, mean %.1f fps, 1%% low %.1f fps, over 25 ms %llu, 50 ms %llu, 100 ms %llu",
+        rt_log("frametime: %s: %llu frames in %.1f s, mean %.1f fps, 1%% low %.1f fps, over 25 ms %llu, 50 ms %llu, 100 ms %llu, interval %d",
                tag, (unsigned long long)ft.frames, (now - ft.t0) / 1e9, ft.frames * 1e9 / ft.sum, low ? 1e9 / low : 0.0,
-               (unsigned long long)ft.over25, (unsigned long long)ft.over50, (unsigned long long)ft.over100);
+               (unsigned long long)ft.over25, (unsigned long long)ft.over50, (unsigned long long)ft.over100,
+               nvn_present_interval());
         // GPU busy time per frame against the wall time per frame tells a GPU-bound period from one spent waiting.
         uint64_t gpu = perf_gpu_busy_total();
         if (gpu > ft.gpu0)
@@ -165,6 +167,8 @@ __attribute__((weak)) void gfx_exit_log(void) {}
 
 void perf_summary_flush(void) {   // at exit (prof_write)
     if (summary_t0) {
+        if (slow_more)
+            rt_log("perf: %llu more slow frames not listed (the log keeps the first 200)", (unsigned long long)slow_more);
         ft_report(kern_now_ns(), "exit");
         gfx_exit_log();
         mem_commit_report("exit");
@@ -342,25 +346,33 @@ void perf_present(uint64_t frame) {
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);
     if (flight_on) flight_frame(frame, now, d, frame_ns, counts);
+    // Slow frames are logged in every run, not only under TOTK_TRACE=perf: a hitch is what makes the game drop its
+    // present interval (and what a report needs). Capped at 200 lines a session so a bad run stays readable.
+    static uint64_t slow_ns, slow_lines;
+    if (!slow_ns) {   // TOTK_PERF_SLOW_MS (default 50)
+        const char *e = cfg_get("TOTK_PERF_SLOW_MS");
+        slow_ns = (uint64_t)(e && atoi(e) > 0 ? atoi(e) : 50) * 1000000ull;
+    }
+    if (last && d >= slow_ns) {
+        if (slow_lines < 200) {
+            slow_lines++;
+            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f",
+                   (unsigned long long)frame, d / 1e6, frame_ns[PERF_PIPE] / 1e6, frame_ns[PERF_XLATE] / 1e6,
+                   frame_ns[PERF_TEX] / 1e6, frame_ns[PERF_ASTC] / 1e6, frame_ns[PERF_FENCE] / 1e6,
+                   frame_ns[PERF_PACE] / 1e6);
+        } else {
+            slow_more++;
+        }
+    }
     if (!(rt_trace & RT_TRACE_PERF)) {
         memset(frame_ns, 0, sizeof frame_ns);
         last = now;
         return;
     }
-    static uint64_t slow_ns;   // TOTK_PERF_SLOW_MS (default 50): frames at least this long get a line of their own
-    if (!slow_ns) {
-        const char *e = cfg_get("TOTK_PERF_SLOW_MS");
-        slow_ns = (uint64_t)(e && atoi(e) > 0 ? atoi(e) : 50) * 1000000ull;
-    }
     if (last) {
         sum += d;
         n++;
         if (d > max) max = d, memcpy(worst_ns, frame_ns, sizeof worst_ns);
-        if (d >= slow_ns)
-            rt_log("perf: slow frame %llu: %.1f ms; blocked pipeline %.1f xlate %.1f texture %.1f astc %.1f fence %.1f pacing %.1f",
-                   (unsigned long long)frame, d / 1e6, frame_ns[PERF_PIPE] / 1e6, frame_ns[PERF_XLATE] / 1e6,
-                   frame_ns[PERF_TEX] / 1e6, frame_ns[PERF_ASTC] / 1e6, frame_ns[PERF_FENCE] / 1e6,
-                   frame_ns[PERF_PACE] / 1e6);
     }
     memset(frame_ns, 0, sizeof frame_ns);
     last = now;
