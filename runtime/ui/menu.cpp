@@ -1115,7 +1115,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     // the port version and the game update, right-aligned on the title line: what a bug report needs first
     char version[96];
     if (!strcmp(rt_game_target, "raiders"))
-        snprintf(version, sizeof version, "SPR Recomp %s, game %s", rt_port_version, rt_game_display);
+        snprintf(version, sizeof version, "InkSplash Raiders %s (SPR Recomp fork), game %s", rt_port_version, rt_game_display);
     else
         snprintf(version, sizeof version, menu_text(UI_MENU_VERSION), rt_port_version, rt_game_display);
     if (g_theme == 2) {

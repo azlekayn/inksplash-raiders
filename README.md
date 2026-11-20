@@ -1,3 +1,40 @@
+# InkSplash Raiders
+
+**A Linux-first + Steam Deck fork of [SPR Recomp](https://github.com/Elie-0066/SPR-Recomp-Project)**, the unofficial
+static recompilation of *Splatoon Raiders* (Nintendo Switch 2). Upstream targets Windows first; this fork builds,
+tests and tunes on Linux (native Vulkan via RADV, Wayland/X11 through SDL 3) with the Steam Deck (1280x800, 60 fps)
+as the handheld target. Fixes that are not Linux-specific are offered back upstream.
+
+Same rules as upstream: no game code or data is included. You need your own copy of the game, and the executable you
+build from it is for your own use only. Do not share builds.
+
+### What this fork changes
+
+- **Shadow blocks fixed** (Linux shadow storage, `runtime/vk_memory.c`): screen tiles no longer lose their sunlight
+  for a frame (translucent dark rectangles flickering in every scene); frame interval 24 ms -> 16.7 ms on the test
+  machine.
+- **Cheaper GPU write-back**: large written storage spans are compared only up to the extent the GPU actually writes
+  (53 MiB -> ~2 MiB a frame; ~3.5 ms of CPU per frame saved, important on the Deck's 4 cores).
+- **Gyro on controllers that appear twice** (e.g. Flydigi Vader 5 Pro on its receiver: SDL's driver with motion
+  sensors plus the kernel's xpad device without): the one with sensors is used.
+- **Rumble no longer freezes Flydigi receivers** (changed rumble values at most every 30 ms): no more "stuck swimming".
+- **Shader pre-compile loading screen** at boot, plus test/debug knobs (`TOTK_WINDOW_POS`, `TOTK_WINDOW_NOFOCUS`,
+  `TOTK_PRESENT_SHOTS`, `TOTK_NO_SHADOW`, `TOTK_INPUT_TRACE`).
+
+### Steam Deck status
+
+Work in progress. A CPU profile on desktop puts the port at ~27 ms of CPU per frame across all threads (game code ~7.6
+ms; the rest is the NVN -> Vulkan replay, write-back and thread-scheduler emulation). The plan: cut the per-frame
+overheads, run the replay on its own thread (`TOTK_REPLAY_ASYNC=1`) and build against the Steam Runtime (sniper)
+sysroot so the binary runs on SteamOS's older glibc.
+
+Mirrors: [GitHub](https://github.com/azlekayn/inksplash-raiders) ·
+[GitLab](https://gitlab.com/azlekayn/inksplash-raiders)
+
+---
+
+*Upstream README follows.*
+
 # SPR Recomp
 
 <a href="https://recomplauncher.com/game/spr-recomp-project"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>

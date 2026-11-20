@@ -313,7 +313,7 @@ static void window_main(void *arg) {
     // button flashes until it is brought up, and TOTK_FULLSCREEN waits for that first activation.
     // TOTK_BACKGROUND_WINDOW=1 (test runs): no flashing, never fullscreen at start, and F11 keeps the window's place.
     int background = g_background = cfg_get("TOTK_BACKGROUND_WINDOW") && atoi(cfg_get("TOTK_BACKGROUND_WINDOW"));
-    const wchar_t *window_title = !strcmp(rt_game_target, "raiders") ? L"SPR Recomp" : L"DKB Recomp";
+    const wchar_t *window_title = !strcmp(rt_game_target, "raiders") ? L"InkSplash Raiders" : L"DKB Recomp";
     g_hwnd = CreateWindowExW(0, wc.lpszClassName, window_title, WND_STYLE, CW_USEDEFAULT, CW_USEDEFAULT, ow, oh, NULL,
                              NULL, inst, NULL);
     if (!g_hwnd) {
