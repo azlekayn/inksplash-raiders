@@ -389,21 +389,57 @@ static void stick(SDL_GamepadAxis ax, SDL_GamepadAxis ay, float dead, int32_t ou
     input_pad_stick(SDL_GetGamepadAxis(pad, ax), -(int32_t)SDL_GetGamepadAxis(pad, ay), dead, out);
 }
 
-// Open the first gamepad when none is open or the open one went away; logs once per change.
+static int pad_motion;                    // the open gamepad has a gyro and an accelerometer
+static SDL_JoystickID pad_no_motion[16];  // gamepads opened and found without them (SDL never reuses an ID)
+static unsigned n_pad_no_motion;
+
+static int has_motion(SDL_Gamepad *g) {
+    return SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(g, SDL_SENSOR_ACCEL);
+}
+
+static int known_no_motion(SDL_JoystickID id) {
+    for (unsigned i = 0; i < n_pad_no_motion && i < 16; i++)
+        if (pad_no_motion[i] == id) return 1;
+    return 0;
+}
+
+static void close_pad(const char *why) {
+    SDL_CloseGamepad(pad); pad = NULL; sensor_pad = 0; sensor_ok = 0; pad_motion = 0;
+    ds5_pad = NULL, ds5_force = 0;   // closed with it: no effect to clear at exit
+    plat_xchg32(&pad_layout_shown, -1);
+    for (int i = 0; i < 4; i++) plat_xchg32(&pad_labels[i], PAD_LABEL_NONE);
+    rt_log("input: gamepad %s", why);
+}
+
+// Open a gamepad when none is open or the open one went away, preferring one with a gyro and an accelerometer; logs
+// once per change. One controller can show up twice: a Flydigi Vader 5 Pro on its receiver is both SDL's Flydigi
+// driver (with motion) and the kernel's xpad device "Generic X-Box pad" (without), in either order. While the open
+// gamepad has no motion sensors, each rescan also opens the gamepads not tried yet and moves to one that has them.
 static void scan_pads(void) {
-    if (pad && SDL_GamepadConnected(pad)) return;
-    if (pad) {
-        SDL_CloseGamepad(pad); pad = NULL; sensor_pad = 0; sensor_ok = 0;
-        ds5_pad = NULL, ds5_force = 0;   // closed with it: no effect to clear at exit
-        plat_xchg32(&pad_layout_shown, -1);
-        for (int i = 0; i < 4; i++) plat_xchg32(&pad_labels[i], PAD_LABEL_NONE);
-        rt_log("input: gamepad disconnected");
-    }
+    if (pad && SDL_GamepadConnected(pad) && pad_motion) return;
+    if (pad && !SDL_GamepadConnected(pad)) close_pad("disconnected");
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n && !pad; i++) pad = SDL_OpenGamepad(ids[i]);
+    SDL_JoystickID cur = pad ? SDL_GetGamepadID(pad) : 0;
+    SDL_Gamepad *fallback = NULL, *found = NULL;
+    for (int i = 0; ids && i < n && !found; i++) {
+        if (ids[i] == cur || known_no_motion(ids[i])) continue;
+        SDL_Gamepad *g = SDL_OpenGamepad(ids[i]);
+        if (!g) continue;
+        if (has_motion(g)) found = g;
+        else {
+            pad_no_motion[n_pad_no_motion++ % 16] = ids[i];
+            if (!pad && !fallback) fallback = g;
+            else SDL_CloseGamepad(g);
+        }
+    }
     SDL_free(ids);
-    if (!pad) return;
+    if (found && fallback) SDL_CloseGamepad(fallback), fallback = NULL;
+    if (found && pad) close_pad("replaced by one with motion sensors");
+    if (found) pad = found;
+    else if (fallback) pad = fallback;
+    else return;   // nothing new: the open gamepad (if any) stays
+    pad_motion = has_motion(pad);
     pad_rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
     pad_east_a = SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;
     for (int i = 0; i < 4; i++) {
@@ -519,7 +555,10 @@ static void pick(int32_t *x, int32_t *y, int32_t kx, int32_t ky) {
 
 // Under lock, state 1: the open gamepad's inputs by position (pd[PAD_*] != 0 held); 0 without a connected gamepad.
 static int pad_physical(uint8_t pd[PAD_COUNT]) {
-    if ((!pad || !SDL_GamepadConnected(pad)) && plat_now_ns() / 1000000u >= next_scan) { next_scan = plat_now_ns() / 1000000u + RESCAN_MS; scan_pads(); }
+    if ((!pad || !SDL_GamepadConnected(pad) || !pad_motion) && plat_now_ns() / 1000000u >= next_scan) {
+        next_scan = plat_now_ns() / 1000000u + RESCAN_MS;
+        scan_pads();
+    }
     SDL_UpdateGamepads();
     if (!pad || !SDL_GamepadConnected(pad)) return 0;
     for (int p = PAD_SOUTH; p < PAD_ZL; p++) pd[p] = SDL_GetGamepadButton(pad, pad_sdl[p]);
@@ -880,12 +919,35 @@ static void motion_main(void *arg) {
         float a[3], g[3];
         int have = 0;
         plat_mutex_lock(&lock);
+        int16_t zl = 0;
         if (pad && SDL_GamepadConnected(pad)) {
             SDL_UpdateGamepads();
             have = sensors_ready() && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, a, 3) &&
                    SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, g, 3);
+            zl = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
         }
         plat_mutex_unlock(&lock);
+        {   // TOTK_INPUT_TRACE=1 (diagnostic): ZL threshold crossings and gaps of 20 ms or more in the gamepad's report
+            // stream (the gyro reading unchanged), as the trace that found rumble freezing a Flydigi pad's input
+            static int trace = -1, zl_on, same;
+            static float lg[3];
+            static uint64_t stall_t0;
+            if (trace < 0) trace = getenv("TOTK_INPUT_TRACE") && strcmp(getenv("TOTK_INPUT_TRACE"), "0");
+            if (trace) {
+                uint64_t now = kern_now_ns();
+                int on = zl > TRIGGER_ON;
+                if (on != zl_on) rt_log("trace: t%.3f ZL %s (axis %d)", now / 1e6, on ? "pressed" : "released", zl), zl_on = on;
+                if (have && g[0] == lg[0] && g[1] == lg[1] && g[2] == lg[2]) {
+                    if (!same++) stall_t0 = now;
+                } else {
+                    if (same >= 5)
+                        rt_log("trace: t%.3f reports stalled %.1f ms (ZL %s)", now / 1e6, (now - stall_t0) / 1e6 + 4,
+                               zl_on ? "held" : "up");
+                    same = 0;
+                }
+                if (have) lg[0] = g[0], lg[1] = g[1], lg[2] = g[2];
+            }
+        }
         if (!have || !input_motion_enabled()) continue;
         double acc[3], gyro[3];
         input_motion_axes(a, g, acc, gyro);

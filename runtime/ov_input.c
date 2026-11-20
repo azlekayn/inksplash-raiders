@@ -184,7 +184,11 @@ _Static_assert(sizeof(VibrationValue) == 16 && sizeof(VibrationDeviceInfo) == 8,
 enum { STYLE_INDEX_FULL_KEY = 3, STYLE_INDEX_HANDHELD = 4, SIX_AXIS_DEVICE = 2, RUMBLE_MS = 250 };
 #define RUMBLE_STALE_NS 250000000ull     // a side the game has not updated for 250 ms is silent
 #define RUMBLE_REFRESH_NS 50000000ull    // an unchanged value is sent again every 50 ms (its 250 ms start over)
-#define RUMBLE_MIN_GAP_NS 10000000ull    // a changed value at most every 10 ms (the game streams every few ms)
+// A changed value at most every 30 ms (the game streams every few ms). Every 10 ms froze a Flydigi Vader 5 Pro on its
+// receiver (SDL's Flydigi driver, sensors on at 1000 Hz): with rumble commands at 100 Hz the pad sent no input reports
+// for seconds at a time, so a released trigger read as held (Splatoon Raiders: swimming on for seconds). Measured
+// outside the game: 100 Hz -> stalls up to 6.3 s; 50 Hz -> 220 ms; 33 Hz -> 49 ms.
+#define RUMBLE_MIN_GAP_NS 30000000ull
 static const VibrationValue vib_neutral = {0, 160, 0, 320};
 
 static int env_zero(const char *name) {
